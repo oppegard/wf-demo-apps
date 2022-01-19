@@ -39,15 +39,31 @@
  */
 package org.glassfish.jersey.examples.helloworld;
 
+import com.wavefront.internal.reporter.SdkReporter;
+import com.wavefront.opentracing.WavefrontTracer;
+import com.wavefront.opentracing.reporting.CompositeReporter;
+import com.wavefront.opentracing.reporting.ConsoleReporter;
+import com.wavefront.opentracing.reporting.Reporter;
+import com.wavefront.opentracing.reporting.WavefrontSpanReporter;
+import com.wavefront.sdk.common.WavefrontSender;
+import com.wavefront.sdk.common.application.ApplicationTags;
+import com.wavefront.sdk.common.clients.WavefrontClient;
+import com.wavefront.sdk.jersey.WavefrontJerseyFilter;
+import com.wavefront.sdk.jersey.reporter.WavefrontJerseyReporter;
+
 import java.io.IOException;
 import java.net.URI;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import org.glassfish.jersey.filter.LoggingFilter;
 import org.glassfish.jersey.grizzly2.httpserver.GrizzlyHttpServerFactory;
 import org.glassfish.jersey.server.ResourceConfig;
 
 import org.glassfish.grizzly.http.server.HttpServer;
+import org.glassfish.jersey.server.ServerProperties;
+
+import io.opentracing.Tracer;
 
 /**
  * Hello world!
@@ -56,12 +72,40 @@ public class App {
 
     private static final URI BASE_URI = URI.create("http://localhost:8080/base/");
     public static final String ROOT_PATH = "helloworld";
+    private static WavefrontJerseyFilter wavefrontJerseyFilter;
+    private static Logger logger = Logger.getLogger(App.class.getCanonicalName());
 
     public static void main(String[] args) {
         try {
             System.out.println("\"Hello World\" Jersey Example App");
 
-            final ResourceConfig resourceConfig = new ResourceConfig(HelloWorldResource.class);
+
+            ApplicationTags applicationTags =
+                new ApplicationTags.Builder("go-jersey", "hello-jersey").build();
+            WavefrontSender wavefrontSender =
+                new WavefrontClient.Builder("http://localhost")
+                    .metricsPort(2878)
+                    .tracesPort(30001)
+                    .build();
+
+            String SOURCE = "goppegard-a01";
+
+            SdkReporter wfJerseyReporter =
+                new WavefrontJerseyReporter.Builder(applicationTags).withSource(SOURCE).build(wavefrontSender);
+            ConsoleReporter consoleReporter = new ConsoleReporter(SOURCE);
+
+
+            Reporter spanRecorder =
+                new WavefrontSpanReporter.Builder().withSource(SOURCE).build(wavefrontSender);
+            Reporter reporter = new CompositeReporter(consoleReporter, spanRecorder);
+            Tracer tracer = new WavefrontTracer.Builder(reporter, applicationTags).withGlobalTag(
+                "debug", "true").withGlobalTag("error", "true").build();
+            WavefrontJerseyFilter.Builder filterBuilder =
+                new WavefrontJerseyFilter.Builder(wfJerseyReporter,
+                applicationTags).withTracer(tracer);
+            wavefrontJerseyFilter = filterBuilder.build();
+
+            final MyApplication resourceConfig = new MyApplication();
             final HttpServer server = GrizzlyHttpServerFactory.createHttpServer(BASE_URI, resourceConfig, false);
             Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
                 @Override
@@ -78,5 +122,14 @@ public class App {
             Logger.getLogger(App.class.getName()).log(Level.SEVERE, null, ex);
         }
 
+    }
+
+    public static class MyApplication extends ResourceConfig {
+        public MyApplication() {
+            register(new LoggingFilter(logger, true));
+            register(wavefrontJerseyFilter);
+            property(ServerProperties.TRACING, "ALL");
+            register(HelloWorldResource.class);
+        }
     }
 }
